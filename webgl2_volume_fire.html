@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgl2 - volume - cloud</title>
+		<meta charset="utf-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0"
+		/>
+		<link type="text/css" rel="stylesheet" href="main.css" />
+	</head>
+
+	<body>
+		<div id="info">
+			<a href="https://threejs.org" target="_blank" rel="noopener">three.js</a>
+			webgl2 - volume - cloud
+		</div>
+
+		<script type="module">
+			import * as THREE from "https://threejs.org/build/three.module.js";
+			import { OrbitControls } from "https://threejs.org/examples/jsm/controls/OrbitControls.js";
+
+			import { GUI } from "https://threejs.org/examples/jsm/libs/lil-gui.module.min.js";
+			import { WEBGL } from "https://threejs.org/examples/jsm/WebGL.js";
+
+			if (WEBGL.isWebGL2Available() === false) {
+				document.body.appendChild(WEBGL.getWebGL2ErrorMessage());
+			}
+
+			let renderer, scene, camera;
+			let mesh;
+
+			init();
+
+			function init() {
+				renderer = new THREE.WebGLRenderer();
+				renderer.setPixelRatio(window.devicePixelRatio);
+				renderer.setSize(window.innerWidth, window.innerHeight);
+				document.body.appendChild(renderer.domElement);
+
+				scene = new THREE.Scene();
+
+				camera = new THREE.PerspectiveCamera(
+					60,
+					window.innerWidth / window.innerHeight,
+					0.1,
+					100
+				);
+				camera.position.set(1.5, 1.5, 0);
+
+				new OrbitControls(camera, renderer.domElement);
+
+				// Sky
+
+				const canvas = document.createElement("canvas");
+				canvas.width = 1;
+				canvas.height = 32;
+
+				const context = canvas.getContext("2d");
+				const gradient = context.createLinearGradient(0, 0, 0, 32);
+				gradient.addColorStop(0.0, "#014a84");
+				gradient.addColorStop(0.5, "#0561a0");
+				gradient.addColorStop(1.0, "#437ab6");
+				context.fillStyle = gradient;
+				context.fillRect(0, 0, 1, 32);
+
+				const sky = new THREE.Mesh(
+					new THREE.SphereGeometry(10),
+					new THREE.MeshBasicMaterial({
+						map: new THREE.CanvasTexture(canvas),
+						side: THREE.BackSide,
+					})
+				);
+				scene.add(sky);
+
+				const textureLoader = new THREE.TextureLoader();
+				textureLoader.load("./textures/rgbnoise.png", function (map) {
+					// Material
+
+					const vertexShader = /* glsl */ `
+					in vec3 position;
+
+					uniform mat4 modelMatrix;
+					uniform mat4 modelViewMatrix;
+					uniform mat4 projectionMatrix;
+					uniform vec3 cameraPos;
+
+					out vec3 vOrigin;
+					out vec3 vDirection;
+
+					void main() {
+						vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+
+						vOrigin = vec3( inverse( modelMatrix ) * vec4( cameraPos, 1.0 ) ).xyz;
+						// vOrigin=vec3(1.0,1.0,0.0);
+						vDirection = position - vOrigin;
+
+						gl_Position = projectionMatrix * mvPosition;
+					}
+				`;
+
+					const fragmentShader = /* glsl */ `
+					precision highp float;
+					precision highp sampler2D;
+
+					const float _NoiseFreq = 2.0;
+					const float _NoiseAmp = 1.0;
+					const vec3 _NoiseAnim = vec3(0., -1., 0.);
+					const int _VolumeSteps=128;
+					const float _Density=0.2;
+					const float _StepSize=.02;
+					const float _SphereRadius=1.0;
+
+					uniform mat4 modelViewMatrix;
+					uniform mat4 projectionMatrix;
+					uniform float time_lxs;
+					uniform float texture_bias;
+
+					in vec3 vOrigin;
+					in vec3 vDirection;
+
+					out vec4 color;
+
+					uniform sampler2D noisemap;
+
+					float hash(float h) {
+						return fract(sin(h) * 43758.5453123);
+					}
+
+					float noise(vec3 x) {
+						vec3 p = floor(x);
+						vec3 f = fract(x);
+						f = f * f * (3.0 - 2.0 * f);
+					
+						float n = p.x + p.y * 157.0 + 113.0 * p.z;
+						return mix(
+								mix(mix(hash(n + 0.0), hash(n + 1.0), f.x),
+										mix(hash(n + 157.0), hash(n + 158.0), f.x), f.y),
+								mix(mix(hash(n + 113.0), hash(n + 114.0), f.x),
+										mix(hash(n + 270.0), hash(n + 271.0), f.x), f.y), f.z);
+					}
+					float hash31(vec3 p3)
+					{
+						p3  = fract(p3 * vec3(.1031,.11369,.13787));
+					    p3 += dot(p3, p3.yzx + 19.19);
+					    return fract((p3.x + p3.y) * p3.z);
+					}
+					//the "fade" function defines the value used to blend values
+					//from each corner of the unit cube
+					//The "Improving Noise" paper updates
+					//this from 3t^2-2t^3 to 6t^5-15t^4+10t^3
+					float fade(float t)
+					{
+					#ifdef OLD_PERLIN
+					    return t * t * (3.0-2.0*t);
+					#else
+					    return  t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+					#endif
+					}
+
+					//original perlin noise calculates gradient functions randomly, whereas "improved" perlin
+					//selects randomly from a fixed array of vectors.
+					vec3 grad(vec3 p)
+					{
+					#ifdef OLD_PERLIN
+					    return -1.0 + 2.0 *vec3(hash31(p.xyz), hash31(p.yxy), hash31(p.zyx));
+					#else
+					    float r = hash31(p)*16.0;
+					    int ri = int(r);
+					
+					    vec3 grads[16];
+					
+					    grads[0] = vec3(1.0, 1.0, 0.0);
+					    grads[1] = vec3(-1.0, 1.0, 0.0);
+					    grads[2] = vec3(1.0, -1.0, 0.0);
+					    grads[3] = vec3(-1.0, -1.0, 0.0);
+					
+					    grads[4] = vec3(1.0, 0.0, 1.0);
+					    grads[5] = vec3(-1.0, 0.0, 1.0);
+					    grads[6] = vec3(1.0, 0.0, -1.0);
+					    grads[7] = vec3(-1.0, 0.0, 1.0);
+					
+					    grads[8] = vec3(0.0, 1.0, 1.0);
+					    grads[9] = vec3(0.0, -1.0, 1.0);
+					    grads[10] = vec3(0.0, 1.0, -1.0);
+					    grads[11] = vec3(0.0, -1.0, -1.0);
+					
+					    //pad array to 16 to avoid the cost of dividing by 12
+					    grads[12] = vec3(1.0, 1.0, 0.0);
+					    grads[13] = vec3(-1.0, 1.0, 0.0);
+					    grads[14] = vec3(0.0, -1.0, 1.0);
+					    grads[15] = vec3(0.0, -1.0, -1.0);
+					
+					    return grads[ri%16];
+					#endif
+					}
+
+					float perlin3d(vec3 p)
+					{
+					    //floorP is used to generate the gradient vectors for the 4 corners of the unit cube
+					    //that surround point p. Since we already need floorP, it's easier to get fractP
+					    //via subtraction than a fract()
+					    vec3 floorP = floor(p);
+					    vec3 fractP = p - floorP;
+					
+					    //calculate distance vectors from the input coordinate to the 4 corners of the unit cube
+					    //these are used to weight the contributions from each corner's gradient vector
+					
+					    // "near" corners (z == 0)
+					    vec3 ntopLeft = fractP - vec3(0.0, 1.0, 0.0);
+					    vec3 ntopRight = fractP - vec3(1.0,1.0, 0.0);
+					    vec3 nbottomLeft = fractP;
+					    vec3 nbottomRight = fractP - vec3(1.0,0.0, 0.0);
+					
+					    // "far" corners (z > 0)
+					    vec3 ftopLeft = fractP - vec3(0.0, 1.0, 1.0);
+					    vec3 ftopRight = fractP - vec3(1.0,1.0, 1.0);
+					    vec3 fbottomLeft = fractP - vec3(0.0,0.0,1.0);
+					    vec3 fbottomRight = fractP - vec3(1.0,0.0, 1.0);
+					
+					    //determine gradient vectors for each corner of the cube
+					    //must be uniform for all sample points within the same "tile" of the noise plane.
+					    //(so (2.4,1.2)'s gradient vectors will be the same as (2.7,1.6)'s)
+					    vec3 ntopLeftGrad = grad(floorP + vec3(0.0, 1.0, 0.0));
+					    vec3 ntopRightGrad = grad(floorP + vec3(1.0, 1.0, 0.0));
+					    vec3 nbottomLeftGrad = grad(floorP);
+					    vec3 nbottomRightGrad = grad(floorP + vec3(1.0, 0.0, 0.0));
+					
+					    vec3 ftopLeftGrad = grad(floorP + vec3(0.0, 1.0, 1.0));
+					    vec3 ftopRightGrad = grad(floorP + vec3(1.0, 1.0, 1.0));
+					    vec3 fbottomLeftGrad = grad(floorP + vec3(0.0, 0.0, 1.0));
+					    vec3 fbottomRightGrad = grad(floorP + vec3(1.0, 0.0, 1.0));
+					
+					    float ng1 = dot(ntopLeft, ntopLeftGrad);
+					    float ng2 = dot(ntopRight, ntopRightGrad);
+					    float ng3 = dot(nbottomLeft, nbottomLeftGrad);
+					    float ng4 = dot(nbottomRight, nbottomRightGrad);
+					
+					    float fg1 = dot(ftopLeft, ftopLeftGrad);
+					    float fg2 = dot(ftopRight, ftopRightGrad);
+					    float fg3 = dot(fbottomLeft, fbottomLeftGrad);
+					    float fg4 = dot(fbottomRight, fbottomRightGrad);
+					
+					    //mix 2 bottom influences together, left to right, according to fade(fractP.x)
+					    //then blend them bottom to top according to fade(fractP.y)
+					    float nmix = mix( mix(ng3,ng4,fade(fractP.x)), mix(ng1,ng2,fade(fractP.x)), fade(fractP.y) );
+					    float fmix = mix( mix(fg3,fg4,fade(fractP.x)), mix(fg1,fg2,fade(fractP.x)), fade(fractP.y) );
+					    return mix(nmix, fmix, fade(fractP.z));
+					}
+
+					float fbm( vec3 p )
+					{
+					    float f = 0.0;
+					    float amp = 0.5;
+					    for(int i=0; i<4; i++)
+					    {
+					        // f += abs(noise(p)) * amp;
+					        f += perlin3d(p) * amp;
+					        p *= 2.03;
+					        amp *= 0.5;
+						}
+					    return f;
+					}
+
+					float Noise3D(in vec3 p3) {
+						p3  = fract(p3 * 0.1031);
+					    p3 += dot(p3, p3.yzx + 33.33);
+					    return fract((p3.x + p3.y) * p3.z);
+					}
+
+					float SmoothNoise3D(in vec3 p) {
+					    vec3 cell = floor(p);
+					    vec3 local = fract(p);
+					    local *= local * (3.0 - 2.0 * local);
+					
+					    float ldb = Noise3D(cell);                       // Left, Down, Back
+					    float rdb = Noise3D(cell + vec3(1.0, 0.0, 0.0)); // Right, Down, Back
+					    float ldf = Noise3D(cell + vec3(0.0, 0.0, 1.0)); // Left, Down, Front
+					    float rdf = Noise3D(cell + vec3(1.0, 0.0, 1.0)); // Right, Down, Front
+					    float lub = Noise3D(cell + vec3(0.0, 1.0, 0.0)); // Left, Up, Back
+					    float rub = Noise3D(cell + vec3(1.0, 1.0, 0.0)); // Right, Up, Back
+					    float luf = Noise3D(cell + vec3(0.0, 1.0, 1.0)); // Left, Up, Front
+					    float ruf = Noise3D(cell + vec3(1.0, 1.0, 1.0)); // Right, Up, Front
+					
+					    return mix(mix(mix(ldb, rdb, local.x),
+					                   mix(ldf, rdf, local.x),
+					                   local.z),
+					
+					               mix(mix(lub, rub, local.x),
+					                   mix(luf, ruf, local.x),
+					                   local.z),
+					
+					               local.y);
+					}
+
+					float FractalNoise3D(in vec3 p, in float scale, in float octaves) {
+					    float value = 0.0;
+					    float nscale = 1.0;
+					    float tscale = 0.0;
+					
+					    for (float octave=0.0; octave < octaves; octave++) {
+					        value += SmoothNoise3D(p * pow(2.0, octave) * scale) * nscale;
+					        tscale += nscale;
+					        nscale *= 0.5;
+					    }
+					
+					    return value / tscale;
+					}
+
+					float distanceFunc(vec3 p)
+					{	
+					
+						// distance to sphere
+					    float d = length(p);//-_SphereRadius;
+						// offset distance with noise
+						d += FractalNoise3D(p*_NoiseFreq + _NoiseAnim*time_lxs,2.,4.) * _NoiseAmp;
+						// d+=SmoothNoise3D(p);
+						
+						return d;
+					}
+					// shade a point based on distance
+					vec4 shade(float d)
+					{	
+						// return vec4(d,d,d,1.);
+						// cloud
+					    // if (d >= 0.0 && d < 0.2) return (mix(vec4(3, 3, 3, 1), vec4(1, 1, 1, 0.8), d / 0.2));
+						// if (d >= 0.2 && d < 0.4) return (mix(vec4(1, 1, 1, 0.8), vec4(1, 1, 1, 0.6), (d - 0.2) / 0.2));
+						// if (d >= 0.4 && d < 0.6) return (mix(vec4(1, 1, 1, 0.6), vec4(1., 1, 1, 0.4), (d - 0.4) / 0.2));    
+					    // if (d >= 0.6 && d < 0.8) return (mix(vec4(1, 1, 1, 0.4), vec4(1, 1, 1, 0.2), (d - 0.6) / 0.2));
+					    // // if (d >= 0.8 && d < 1.0) return (mix(vec4(0, .0, 0, .2), vec4(0, .6, 1, 0), (d - 0.8) / 0.2));   
+
+						
+    					if (d >= 0.0 && d < 0.2) return (mix(vec4(3, 3, 3, 1), vec4(1, 1, 0, 1), d / 0.2));
+						if (d >= 0.2 && d < 0.4) return (mix(vec4(1, 1, 0, 1), vec4(1, 0, 0, 1), (d - 0.2) / 0.2));
+						if (d >= 0.4 && d < 0.6) return (mix(vec4(1, 0, 0, 1), vec4(0, 0, 0, 0), (d - 0.4) / 0.2));    
+    					// if (d >= 0.6 && d < 0.8) return (mix(vec4(0, 0, 0, 0), vec4(0, .5, 1, 0.2), (d - 0.6) / 0.2));
+    					// if (d >= 0.8 && d < 1.0) return (mix(vec4(0, .5, 1, .2), vec4(0, 0, 0, 0), (d - 0.8) / 0.2));            
+    
+						
+					    return vec4(0.0, 0.0, 0.0, 0.0);
+					}
+
+					vec4 volumeFunc(vec3 p)
+					{
+						float d=distanceFunc(p);
+						return shade(d-.2);
+					}
+					vec2 hitBox( vec3 orig, vec3 dir ) {
+						const vec3 box_min = vec3( - 1. );
+						const vec3 box_max = vec3( 1. );
+						vec3 inv_dir = 1.0 / dir;
+						vec3 tmin_tmp = ( box_min - orig ) * inv_dir;
+						vec3 tmax_tmp = ( box_max - orig ) * inv_dir;
+						vec3 tmin = min( tmin_tmp, tmax_tmp );
+						vec3 tmax = max( tmin_tmp, tmax_tmp );
+						float t0 = max( tmin.x, max( tmin.y, tmin.z ) );
+						float t1 = min( tmax.x, min( tmax.y, tmax.z ) );
+						return vec2( t0, t1 );
+					}
+
+					vec2 hitSphere(vec3 origin,vec3 dir){
+						float b=dot(dir,origin);
+						float c=dot(origin,origin)-_SphereRadius*_SphereRadius;
+
+						float t0=-b-sqrt(b*b-c);
+						float t1=-b+sqrt(b*b-c);
+						t0=max(t0,0.);
+						return vec2(t0,t1);
+					}
+
+					vec4 rayMarch(vec3 rayOrigin,vec3 rayStep,out vec3 pos)
+					{
+						vec4 sum=vec4(0.,0.,0.,0.);
+						pos=rayOrigin;
+						for(int i=0;i<_VolumeSteps;i++)
+						{
+							vec4 col=volumeFunc(pos);
+							col.a*=_Density;
+							col.rgb*=col.a;
+							sum=sum+col*(1.0-sum.a);
+							pos+=rayStep;
+						}
+						return sum;
+					}
+
+					void main(){
+						vec3 rayDir = normalize( vDirection );
+
+						vec2 bounds=hitSphere(vOrigin,rayDir);
+						if(bounds.y<0.) discard;
+
+						vec3 hitPos;
+						//射线第一次进入球的位置
+						vec3 p=vOrigin+bounds.x*rayDir;
+
+						vec4 col=rayMarch(p,rayDir*_StepSize,hitPos);
+						color = col;
+
+						if ( color.a == 0.0 ) discard;
+
+					}
+				`;
+					const boxSize = 1;
+					const geometry = new THREE.SphereGeometry(boxSize, 16, 16);
+					const material = new THREE.RawShaderMaterial({
+						glslVersion: THREE.GLSL3,
+						uniforms: {
+							cameraPos: { value: new THREE.Vector3() },
+							time_lxs: { value: 0 },
+							noisemap: { value: map },
+							texture_bias: { value: 0 },
+						},
+						vertexShader,
+						fragmentShader,
+						side: THREE.BackSide,
+						transparent: true,
+					});
+
+					mesh = new THREE.Mesh(geometry, material);
+					scene.add(mesh);
+
+					const parameters = {
+						threshold: 0.25,
+						opacity: 0.25,
+						range: 0.1,
+						texture_bias: -16.0,
+					};
+
+					function update() {
+						material.uniforms.time_lxs = 0;
+						material.uniforms.texture_bias = parameters.texture_bias;
+					}
+
+					const gui = new GUI();
+					gui.add(parameters, "threshold", 0, 1, 0.01).onChange(update);
+					gui.add(parameters, "opacity", 0, 1, 0.01).onChange(update);
+					gui.add(parameters, "range", 0, 1, 0.01).onChange(update);
+					gui
+						.add(parameters, "texture_bias", -16.0, 15.99, 0.1)
+						.onChange(update);
+
+					window.addEventListener("resize", onWindowResize);
+
+					animate(0);
+				});
+			}
+
+			function onWindowResize() {
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize(window.innerWidth, window.innerHeight);
+			}
+
+			function animate(time) {
+				requestAnimationFrame(animate);
+
+				mesh.material.uniforms.cameraPos.value.copy(camera.position);
+				// mesh.rotation.z = -performance.now() / 7500;
+				mesh.material.uniforms.time_lxs.value = performance.now() / 3500;
+
+				renderer.render(scene, camera);
+			}
+		</script>
+	</body>
+</html>
