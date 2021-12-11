@@ -7,13 +7,13 @@
 			name="viewport"
 			content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0"
 		/>
+		
 		<link type="text/css" rel="stylesheet" href="main.css" />
 	</head>
 
 	<body>
 		<div id="info">
-			<a href="https://threejs.org" target="_blank" rel="noopener">three.js</a>
-			webgl2 - volume - cloud
+			
 		</div>
 
 		<script type="module">
@@ -73,11 +73,9 @@
 				);
 				scene.add(sky);
 
-				const textureLoader = new THREE.TextureLoader();
-				textureLoader.load("./textures/rgbnoise.png", function (map) {
-					// Material
+				// Material
 
-					const vertexShader = /* glsl */ `
+				const vertexShader = /* glsl */ `
 					in vec3 position;
 
 					uniform mat4 modelMatrix;
@@ -105,8 +103,10 @@
 
 					const float _NoiseFreq = 2.0;
 					const float _NoiseAmp = 1.0;
-					const vec3 _NoiseAnim = vec3(0., -1., 0.);
-					const int _VolumeSteps=128;
+					// const vec3 _NoiseAnim = vec3(0., -1., 0.);
+					uniform vec3 _NoiseAnim;
+					// const int _VolumeSteps=128;
+					uniform int _VolumeSteps;
 					const float _Density=0.2;
 					const float _StepSize=.02;
 					const float _SphereRadius=1.0;
@@ -120,8 +120,6 @@
 					in vec3 vDirection;
 
 					out vec4 color;
-
-					uniform sampler2D noisemap;
 
 					float hash(float h) {
 						return fract(sin(h) * 43758.5453123);
@@ -247,7 +245,6 @@
 					    float fmix = mix( mix(fg3,fg4,fade(fractP.x)), mix(fg1,fg2,fade(fractP.x)), fade(fractP.y) );
 					    return mix(nmix, fmix, fade(fractP.z));
 					}
-
 					float fbm( vec3 p )
 					{
 					    float f = 0.0;
@@ -255,7 +252,7 @@
 					    for(int i=0; i<4; i++)
 					    {
 					        // f += abs(noise(p)) * amp;
-					        f += perlin3d(p) * amp;
+					        f += noise(p) * amp;
 					        p *= 2.03;
 					        amp *= 0.5;
 						}
@@ -314,6 +311,7 @@
 					    float d = length(p);//-_SphereRadius;
 						// offset distance with noise
 						d += FractalNoise3D(p*_NoiseFreq + _NoiseAnim*time_lxs,2.,4.) * _NoiseAmp;
+						// d+=fbm(p*_NoiseFreq + _NoiseAnim*time_lxs)*_NoiseAmp;
 						// d+=SmoothNoise3D(p);
 						
 						return d;
@@ -407,8 +405,8 @@
 						uniforms: {
 							cameraPos: { value: new THREE.Vector3() },
 							time_lxs: { value: 0 },
-							noisemap: { value: map },
-							texture_bias: { value: 0 },
+							_NoiseAnim: { value: new THREE.Vector3(0,-1,0) },
+							_VolumeSteps:{value:128}
 						},
 						vertexShader,
 						fragmentShader,
@@ -420,29 +418,29 @@
 					scene.add(mesh);
 
 					const parameters = {
-						threshold: 0.25,
-						opacity: 0.25,
-						range: 0.1,
-						texture_bias: -16.0,
+						Vx: 0,
+						Vy: -1,
+						Vz: 0,
+						step: 128,
 					};
 
 					function update() {
-						material.uniforms.time_lxs = 0;
-						material.uniforms.texture_bias = parameters.texture_bias;
+						material.uniforms._NoiseAnim.value.copy(new THREE.Vector3(
+							parameters.Vx,parameters.Vy,parameters.Vz
+						));
+						material.uniforms._VolumeSteps.value = parameters.step;
 					}
 
 					const gui = new GUI();
-					gui.add(parameters, "threshold", 0, 1, 0.01).onChange(update);
-					gui.add(parameters, "opacity", 0, 1, 0.01).onChange(update);
-					gui.add(parameters, "range", 0, 1, 0.01).onChange(update);
-					gui
-						.add(parameters, "texture_bias", -16.0, 15.99, 0.1)
+					gui.add(parameters, "Vx", -1, 1, 0.01).onChange(update);
+					gui.add(parameters, "Vy", -1, 1, 0.01).onChange(update);
+					gui.add(parameters, "Vz", -1, 1, 0.01).onChange(update);
+					gui.add(parameters, "step", 100, 200, 0.1)
 						.onChange(update);
 
 					window.addEventListener("resize", onWindowResize);
 
-					animate(0);
-				});
+					animate();
 			}
 
 			function onWindowResize() {
@@ -452,7 +450,7 @@
 				renderer.setSize(window.innerWidth, window.innerHeight);
 			}
 
-			function animate(time) {
+			function animate() {
 				requestAnimationFrame(animate);
 
 				mesh.material.uniforms.cameraPos.value.copy(camera.position);
